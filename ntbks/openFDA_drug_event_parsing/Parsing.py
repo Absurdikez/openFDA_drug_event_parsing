@@ -8,25 +8,25 @@
 # In[1]:
 
 
-import os
+import gc
 import io
-import urllib
-import requests
-import zipfile
 import json
+import os
 import time
+import urllib
+import zipfile
+
 import numpy as np
 import pandas as pd
-from pandas.io.json import json_normalize
-
+import requests
 
 # read in api token and put in header for api call
 
 # In[2]:
 
 
-api_token = pd.read_csv('../../.openFDA.params').api_key.values[0]
-
+api_token = pd.read_csv('./.openFDA.params').api_key.values[0]
+data_dir = "./data/"
 
 # In[3]:
 
@@ -77,9 +77,6 @@ drug_event_files = [x['file'] for x in data['results']['drug']['event']['partiti
 # create output directory
 
 # In[9]:
-
-
-data_dir = "../../data/"
 try:
     os.mkdir(data_dir)
 except:
@@ -195,7 +192,7 @@ def report_formatter(df):
             if attributes_dict[col]['possible_values']['type']=='one_of':
                 attributes_dict_col = attributes_dict[col]['possible_values']['value']
                 df[col] = df[col].astype(float)
-                df[col] = (df[col].
+                df.loc[:, col] = (df[col].
                  apply(lambda x : str(int(x)) if (x>=0) else x).
                  map(attributes_dict_col)
                 )
@@ -222,7 +219,7 @@ def primarysource_formatter(df):
             if attributes_dict[col]['possible_values']['type']=='one_of':
                 attributes_dict_col = attributes_dict[col]['possible_values']['value']
                 df[keyword+'.'+col] = df[keyword+'.'+col].astype(float)
-                df[keyword+'.'+col] = (df[keyword+'.'+col].
+                df.loc[:, keyword+'.'+col] = (df[keyword+'.'+col].
                  apply(lambda x : str(int(x)) if (x>=0) else x).
                  map(attributes_dict_col)
                 )                
@@ -245,7 +242,7 @@ def report_serious_formatter(df):
     try:
         attributes_dict_col = attributes_dict[col]['possible_values']['value']
         df[col] = df[col].astype(float)
-        df[col] = (df[col].
+        df.loc[:, col] = (df[col].
          apply(lambda x : str(int(x)) if (x>=0) else x).
          map(attributes_dict_col)
         )
@@ -269,7 +266,7 @@ def patient_formatter(df):
             if attributes_dict[col]['possible_values']['type']=='one_of':
                 attributes_dict_col = attributes_dict[col]['possible_values']['value']
                 df['patient.'+col] = df['patient.'+col].astype(float)
-                df['patient.'+col] = (df['patient.'+col].
+                df.loc[:, 'patient.'+col] = (df['patient.'+col].
                  apply(lambda x : str(int(x)) if (x>=0) else x).
                  map(attributes_dict_col)
                 )                
@@ -289,12 +286,12 @@ def patient_formatter(df):
 
     aged['master_age'] = np.nan
     
-    aged['master_age'].loc[year_reports] = aged['patient.patientonsetage'].loc[year_reports].astype(int)
-    aged['master_age'].loc[month_reports] = aged['patient.patientonsetage'].loc[month_reports].astype(int)/12.
-    aged['master_age'].loc[week_reports] = aged['patient.patientonsetage'].loc[week_reports].astype(int)/365.
-    aged['master_age'].loc[day_reports] = aged['patient.patientonsetage'].loc[day_reports].astype(int)/365.
-    aged['master_age'].loc[decade_reports] = aged['patient.patientonsetage'].loc[decade_reports].astype(int)*10.
-    aged['master_age'].loc[hour_reports] = aged['patient.patientonsetage'].loc[hour_reports].astype(int)/365./24.
+    aged.loc[year_reports, 'master_age'] = aged.loc[year_reports, 'patient.patientonsetage'].astype(int)
+    aged.loc[month_reports, 'master_age'] = aged.loc[month_reports, 'patient.patientonsetage'].astype(int)/12.
+    aged.loc[week_reports, 'master_age'] = aged.loc[week_reports, 'patient.patientonsetage'].astype(int)/365.
+    aged.loc[day_reports, 'master_age'] = aged.loc[day_reports, 'patient.patientonsetage'].astype(int)/365.
+    aged.loc[decade_reports, 'master_age'] = aged.loc[decade_reports, 'patient.patientonsetage'].astype(int)*10.
+    aged.loc[hour_reports, 'master_age'] = aged.loc[hour_reports, 'patient.patientonsetage'].astype(int)/365./24.
     
     
     return df.join(aged[['master_age']])
@@ -318,12 +315,12 @@ def patient_drug_formatter(df):
                 attributes_dict_col = attributes_dict[col]['possible_values']['value']
                 df[col] = df[col].astype(float)
                 if col=='drugadministrationroute':
-                    df[col] = (df[col].
+                    df.loc[:, col] = (df[col].
                      apply(lambda x : ''.join(np.repeat('0',3-len(str(int(x)))))+str(int(x)) if (x>=0) else x).
                      map(attributes_dict_col)
                     )
                 else:
-                    df[col] = (df[col].
+                    df.loc[:, col] = (df[col].
                      apply(lambda x : str(int(x)) if (x>=0) else x).
                      map(attributes_dict_col)
                     )
@@ -427,7 +424,7 @@ def patient_reactions_formatter(df):
             if attributes_dict[col]['possible_values']['type']=='one_of':
                 attributes_dict_col = attributes_dict[col]['possible_values']['value']
                 df[col] = df[col].astype(float)
-                df[col] = (df[col].
+                df.loc[:, col] = (df[col].
                  apply(lambda x : str(int(x)) if (x>=0) else x).
                  map(attributes_dict_col)
                 )
@@ -470,25 +467,36 @@ def parse_patient_reaction_data(results):
 # In[23]:
 
 
-def parsing_main(drug_event_file):
-    t0 = time.time()
-    
+def parsing_main(drug_event_file): 
     file_lst = drug_event_file.split('/')[2:]
     out_file = '_'.join(file_lst[3:]).split('.')[0]
     
+    # Check if all output files already exist
+    if (os.path.exists(out_meta + out_file + '_meta.csv.gzip') and
+        os.path.exists(out_report + out_file + '_report.csv.gzip') and
+        os.path.exists(out_patient + out_file + '_patient.csv.gzip') and
+        os.path.exists(out_patient_drug + out_file + '_patient_drug.csv.gzip') and
+        os.path.exists(out_patient_drug_openfda + out_file + '_patient_drug_openfda.csv.gzip') and
+        os.path.exists(out_patient_drug_openfda_rxcui + out_file + '_patient_drug_openfda_rxcui.csv.gzip') and
+        os.path.exists(out_patient_reaction + out_file + '_patient_reaction.csv.gzip')):
+        print(f'\n{out_file} has already been parsed. Skipping...\n')
+        return
+    
+    t0 = time.time()
     print('\nparsing '+out_file+"...\n")
     
     try:
         data = request_and_generate_data(drug_event_file,headers=headers,stream=True)
     
         #parse metadata
-        meta = json_normalize(data['meta'])
+        meta = pd.json_normalize(data['meta'])
         (meta.
          to_csv(out_meta+out_file+'_meta.csv.gzip',
                     compression='gzip'))
         del meta
+        gc.collect()  # Force garbage collection
         
-        results = json_normalize(data['results'])
+        results = pd.json_normalize(data['results'])
 
         #parse and output report data
         results.index = results['safetyreportid'].values
@@ -509,6 +517,7 @@ def parsing_main(drug_event_file):
                     compression='gzip'))
             del report
             del report_df
+            gc.collect()  # Force garbage collection
         except:
             print('could not parse report data in '+out_file)
             pass
@@ -523,6 +532,7 @@ def parsing_main(drug_event_file):
              to_csv(out_patient+out_file+'_patient.csv.gzip',
                     compression='gzip'))
             del patient_df
+            gc.collect()  # Force garbage collection
         except:
             print('could not parse patient data in '+out_file)
             pass
@@ -534,6 +544,7 @@ def parsing_main(drug_event_file):
              to_csv(out_patient_drug+out_file+'_patient_drug.csv.gzip',
                     compression='gzip'))
             del patientdrug_df
+            gc.collect()  # Force garbage collection
         except:
             print('could not parse patient.drug data in '+out_file)
             pass
@@ -549,6 +560,7 @@ def parsing_main(drug_event_file):
                 out_patient_drug_openfda_rxcui+out_file+'_patient_drug_openfda_rxcui.csv.gzip',
                 compression='gzip'))
             del openfdas_df
+            gc.collect()  # Force garbage collection
         except:
             print('could not parse patient.drug.openfda data in '+out_file)
             pass
@@ -560,6 +572,7 @@ def parsing_main(drug_event_file):
              to_csv(out_patient_reaction+out_file+'_patient_reaction.csv.gzip',
                     compression='gzip'))
             del patientreactions
+            gc.collect()  # Force garbage collection
         except:
             print('could not parse patient.reaction data in '+out_file)
             pass
@@ -579,10 +592,12 @@ def parsing_main(drug_event_file):
 
 
 from joblib import Parallel, delayed
+
 #from dask import delayed, compute, persist
 #from dask.distributed import Client, LocalCluster, progress
 
-n_jobs = 4
+n_jobs = 1
+batch_size = 10  # Process files in batches of 10
 
 #if __name__=='__main__':
 t0_loop = time.time()
@@ -594,12 +609,16 @@ Parallel(n_jobs=n_jobs)(delayed(parsing_main)(drug_event_file) for drug_event_fi
 #results = [delayed(parsing_main)(drug_event_file) for drug_event_file in drug_event_files]
 #compute(*results[:1])      # convert to final result when done if desired  
 
+for i in range(0, len(drug_event_files), batch_size):
+    batch = drug_event_files[i:i+batch_size]
+    Parallel(n_jobs=n_jobs)(delayed(parsing_main)(drug_event_file) for drug_event_file in batch)
+    gc.collect()  # Force garbage collection after each batch
+
 t1_loop = time.time()
 print("\n"+str(np.round(t1_loop-t0_loop,0))+' seconds to parse files')
 
-
+print("Completed")
 # In[ ]:
-
 
 
 
