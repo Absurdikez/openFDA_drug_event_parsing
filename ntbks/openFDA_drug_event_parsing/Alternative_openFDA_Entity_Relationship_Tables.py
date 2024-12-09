@@ -34,9 +34,8 @@ except FileExistsError:
 primarykey = 'safetyreportid'
 
 def read_file(file):
-    # Örnek bir dosyadan meta bilgisi çıkartma
-    sample_df = pd.read_csv(file, compression='gzip', nrows=0)  # Sadece kolon isimlerini alır
-    # Dask DataFrame döndürme
+    sample_df = pd.read_csv(file, compression='gzip', nrows=0) 
+    # Dask DataFrame
     return dd.read_csv(
         file,
         compression='gzip',
