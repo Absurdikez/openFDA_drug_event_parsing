@@ -11,9 +11,27 @@ from dask import delayed, compute
 import dask.dataframe as dd
 import pickle
 import os
+from multiprocessing import Pool, cpu_count
 
-data_dir = "../../data/openFDA_drug_event/"
-er_dir = data_dir+'er_tables/'
+
+# Get the current working directory
+current_dir = os.getcwd()
+
+data_dir = os.path.join(current_dir, "data/openFDA_drug_event/")
+er_dir = os.path.join(data_dir, "er_tables/")
+dir_ = os.path.join(data_dir, "report/")
+
+dir_ = data_dir+'report/'
+print("Checking directory path:", dir_)
+
+if not os.path.exists(dir_):
+    print(f"Directory does not exist: {dir_}")
+    raise FileNotFoundError(f"Directory not found: {dir_}")
+else:
+    files = glob.glob(dir_ + '*.csv.gzip')
+    print(f"Number of files found in {dir_}: {len(files)}")
+    if len(files) == 0:
+        print(f"No .csv.gz files found in the directory: {dir_}")
 
 try:
     os.mkdir(er_dir)
@@ -275,50 +293,111 @@ del patient_df
 
 # In[ ]:
 
-
-dir_ = data_dir+'patient_drug/'
-files = glob.glob(dir_+'*.csv.gzip')
+dir_ = data_dir + 'patient_drug/'
+files = glob.glob(dir_ + '*.csv.gzip')
 results = []
+
+# Define chunk size (large size for better performance)
+chunk_size = 100000  # Adjust this value based on your system's capability
+
+# Function to read files in chunks
+def read_file_in_chunks(file, chunk_size):
+    chunks = pd.read_csv(
+        file,
+        compression='gzip',
+        index_col=0,
+        chunksize=chunk_size,  # Enable chunking
+        dtype={primarykey: 'str'}  # Ensure primary key is read as a string
+    )
+    return [chunk for chunk in chunks]
+
+# Read all files in chunks
 for file in files:
-    df = delayed(read_file)(file)
-    results.append(df)
-patient_drug_df = (pd.concat(compute(*results),sort=True))
-patient_drug_df[primarykey] = (patient_drug_df[primarykey].astype(str))
+    # Use Dask delayed to handle chunk processing
+    df_chunks = delayed(read_file_in_chunks)(file, chunk_size)
+    results.append(df_chunks)  # Append the delayed object to results
+
+# Compute the results and concatenate into a single DataFrame
+computed_results = compute(*results)  # Compute all delayed objects
+patient_drug_df = pd.concat([chunk for result in computed_results for chunk in result], sort=True)
+
 print(patient_drug_df.columns.values)
-patient_drug_df.head()
+print(patient_drug_df.head())
 
 
 # #### drugcharacteristics_er_df
 
 # In[ ]:
 
+columns = [
+    primarykey,
+    'medicinalproduct',
+    'drugcharacterization',
+    'drugadministrationroute',
+    'drugindication'
+]
 
-columns = [primarykey,
-           'medicinalproduct',
-           'drugcharacterization',
-           'drugadministrationroute',
-           'drugindication'
-          ]
+# Rename mapping
 rename_columns = {
-              'medicinalproduct' : 'medicinal_product',
-              'drugcharacterization' : 'drug_characterization',
-              'drugadministrationroute': 'drug_administration',
-    'drugindication' : 'drug_indication'
+    'medicinalproduct': 'medicinal_product',
+    'drugcharacterization': 'drug_characterization',
+    'drugadministrationroute': 'drug_administration',
+    'drugindication': 'drug_indication'
 }
 
-drugcharacteristics_er_df = (patient_drug_df[columns].
-                             rename(columns=rename_columns).
-                             set_index(primarykey).
-                             sort_index().
-                             reset_index().
-                             drop_duplicates().
-                             dropna(subset=[primarykey])
-                            )
-drugcharacteristics_er_df = (drugcharacteristics_er_df.
-                             reindex(np.sort(drugcharacteristics_er_df.columns),axis=1))
-print(drugcharacteristics_er_df.info())
-drugcharacteristics_er_df.head()
+def process_and_save_chunks(df, chunksize, output_path):
+    """
+    Process the given DataFrame in smaller chunks and save the results incrementally.
+    
+    Parameters:
+        df (DataFrame): The DataFrame to process.
+        chunksize (int): The number of rows per chunk.
+        output_path (str): Path to save the processed output.
+    """
+    num_chunks = len(df) // chunksize + 1  # Calculate total number of chunks
 
+    for i in range(num_chunks):
+        # Slice the DataFrame into a chunk
+        chunk = df.iloc[i * chunksize : (i + 1) * chunksize]
+
+        # Process the chunk
+        processed_chunk = (chunk[columns]
+                           .rename(columns=rename_columns)
+                           .drop_duplicates()
+                           .dropna(subset=[primarykey])
+                          )
+
+        # Save processed chunk to file
+        if i == 0:
+            # For the first chunk, write with a header
+            processed_chunk.to_csv(output_path, index=False, mode='w', header=True)
+        else:
+            # For subsequent chunks, append without a header
+            processed_chunk.to_csv(output_path, index=False, mode='a', header=False)
+
+# Define the output file for saving processed chunks
+output_file = "processed_drugcharacteristics.csv"
+
+# Process the DataFrame in chunks and save to file
+process_and_save_chunks(patient_drug_df, chunksize=100000, output_path=output_file)
+
+# Load the full processed file for final sorting and reindexing
+drugcharacteristics_er_df = pd.read_csv(output_file)
+
+# Perform final sorting and reindexing
+drugcharacteristics_er_df = drugcharacteristics_er_df.reset_index(drop=True)
+drugcharacteristics_er_df = drugcharacteristics_er_df.reindex(sorted(drugcharacteristics_er_df.columns), axis=1)
+
+# Delete the temporary CSV file
+if os.path.exists(output_file):
+    os.remove(output_file)
+    print(f"Temporary file {output_file} has been deleted.")
+else:
+    print(f"Temporary file {output_file} not found.")
+    
+# Print the results
+print(drugcharacteristics_er_df.info())
+print(drugcharacteristics_er_df.head())
 
 # In[ ]:
 
@@ -332,7 +411,7 @@ drugcharacteristics_er_df.head()
 
 del drugcharacteristics_er_df
 del patient_drug_df
-del df
+#del df # check if this is removed or not
 
 
 # ### drugs
@@ -341,20 +420,62 @@ del df
 
 # In[ ]:
 
+dir_ = data_dir + 'patient_drug_openfda_rxcui/'
+files = glob.glob(dir_ + '*.csv.gzip')
+output_file = "processed_patient_drug_openfda_rxcui.csv"
 
-dir_ = data_dir+'patient_drug_openfda_rxcui/'
-files = glob.glob(dir_+'*.csv.gzip')
-results = []
+# Define primary key and chunk size
+chunk_size = 200000  # Adjust this value based on your system's capability
+
+# Ensure output file doesn't exist
+if os.path.exists(output_file):
+    os.remove(output_file)
+
+# Function to process each file in chunks
+def process_file_in_chunks2(file, output_path, chunk_size):
+    with pd.read_csv(file, compression='gzip', chunksize=chunk_size, dtype={primarykey: 'str'}) as reader:
+        for i, chunk in enumerate(reader):
+            # Ensure primary key column is a string
+            chunk[primarykey] = chunk[primarykey].astype(str)
+            
+            # Convert 'value' column to integer
+            if 'value' in chunk.columns:
+                chunk['value'] = pd.to_numeric(chunk['value'], errors='coerce').fillna(0).astype(int)
+            
+            # Append processed chunk to output file
+            mode = 'a' if os.path.exists(output_path) else 'w'
+            header = not os.path.exists(output_path) or i == 0
+            try:
+                chunk.to_csv(output_path, mode=mode, header=header, index=False)
+            except Exception as e:
+                print(f"Error writing chunk {i+1} from file {file}: {e}")
+                raise
+
+# Process all files and save results incrementally
+count = 0
 for file in files:
-    df = delayed(read_file)(file)
-    results.append(df)
-patient_drug_openfda_rxcui_df = (pd.concat(compute(*results),sort=True))
+    process_file_in_chunks2(file, output_file, chunk_size)
+    count += 1
+    if count % 1000 == 0:
+        print(f"Processed file: {file}")
+
+del count
+
+# Load the combined processed file for final operations
+try:
+    patient_drug_openfda_rxcui_df = pd.read_csv(output_file)
+except Exception as e:
+    print(f"Error reading the file: {e}")
+    raise
+
+# Display columns and a preview of the combined DataFrame
 print(patient_drug_openfda_rxcui_df.columns.values)
-patient_drug_openfda_rxcui_df[primarykey] = (patient_drug_openfda_rxcui_df[primarykey].
-                                       astype(str))
-patient_drug_openfda_rxcui_df.value = (patient_drug_openfda_rxcui_df.
-                                 value.astype(int))
-patient_drug_openfda_rxcui_df.head()
+print(patient_drug_openfda_rxcui_df.head())
+
+# Optional: Delete the temporary file after loading
+if os.path.exists(output_file):
+    os.remove(output_file)
+    print(f"Temporary file {output_file} has been deleted.")
 
 
 # #### drugs_er_df
@@ -381,7 +502,6 @@ drugs_er_df = drugs_er_df.reindex(np.sort(drugs_er_df.columns),axis=1)
 print(drugs_er_df.info())
 drugs_er_df.head()
 
-
 # In[ ]:
 
 
@@ -405,7 +525,7 @@ drugs_er_df[primarykey] = drugs_er_df[primarykey].astype(str)
 
 del patient_drug_openfda_rxcui_df
 del drugs_er_df
-del df
+# del df # check if this is removed or not
 
 
 # ### reactions
@@ -414,17 +534,46 @@ del df
 
 # In[ ]:
 
+dir_ = data_dir + 'patient_reaction/'
+files = glob.glob(dir_ + '*.csv.gzip')
+output_file = "processed_patient_reaction.csv"
 
-dir_ = data_dir+'patient_reaction/'
-files = glob.glob(dir_+'*.csv.gzip')
-results = []
+chunk_size = 200000  # Adjust based on your system's memory capacity
+
+def process_file_in_chunks(file, output_path, chunk_size):
+    """
+    Read and process a file in chunks and save results incrementally.
+    
+    Parameters:
+        file (str): File path to process.
+        output_path (str): Output file to save processed results.
+        chunk_size (int): Number of rows per chunk.
+    """
+    with pd.read_csv(file, compression='gzip', chunksize=chunk_size, dtype={primarykey: 'str'}) as reader:
+        for i, chunk in enumerate(reader):
+            # Ensure primary key column is a string
+            chunk[primarykey] = chunk[primarykey].astype(str)
+            
+            # Append processed chunk to output file
+            if os.path.exists(output_path) and i > 0:
+                chunk.to_csv(output_path, mode='a', header=False, index=False)
+            else:
+                chunk.to_csv(output_path, mode='w', header=True, index=False)
+
+# Process all files and save results incrementally
 for file in files:
-    df = delayed(read_file)(file)
-    results.append(df)
-patient_reaction_df = (pd.concat(compute(*results),sort=True))
-patient_reaction_df[primarykey] = (patient_reaction_df[primarykey].astype(str))
+    process_file_in_chunks(file, output_file, chunk_size)
+
+# Load the combined processed file for final operations
+patient_reaction_df = pd.read_csv(output_file)
+
 print(patient_reaction_df.columns.values)
-patient_reaction_df.head()
+print(patient_reaction_df.head())
+
+# Delete the temporary file after loading
+if os.path.exists(output_file):
+    os.remove(output_file)
+    print(f"Temporary file {output_file} has been deleted.")
 
 
 # #### patient_reaction_er_df
@@ -466,7 +615,9 @@ reactions_er_df.head()
 
 del patient_reaction_df
 del reactions_er_df
-del df
+
+if 'df' in locals():
+    del df
 
 
 # ### omop tables for joining
@@ -2941,4 +3092,3 @@ del standard_reactions_meddrapt_to_snomed
 del standard_reactions_meddrahlt_to_snomed
 del standard_reactions_meddrahlgt_to_snomed
 del standard_reactions_meddra_relationships
-
